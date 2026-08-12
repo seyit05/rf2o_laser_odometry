@@ -42,11 +42,22 @@ CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
 
   // Init Publishers and Subscribers
   //---------------------------------
-  buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+  // TF buffer with timeout for ROS2 Humble compatibility
+  buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock(), tf2::Duration(tf2::BUFFER_CORE_DEFAULT_CACHE_TIME));
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
   odom_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(this);
-  odom_pub  = this->create_publisher<nav_msgs::msg::Odometry>(odom_topic, 5);
-  laser_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(laser_scan_topic,rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile(),
+  // Use Reliable QoS for Odometry (SLAM Toolbox compatibility)
+  rclcpp::QoS odom_qos(10);
+  odom_qos.reliability(rclcpp::ReliabilityPolicy::Reliable);
+  odom_qos.durability(rclcpp::DurabilityPolicy::Volatile);
+  odom_qos.history(rclcpp::HistoryPolicy::KeepLast);
+  odom_pub  = this->create_publisher<nav_msgs::msg::Odometry>(odom_topic, odom_qos);
+  // Use Reliable QoS for LaserScan (Nav2 and YDLIDAR compatibility)
+  rclcpp::QoS scan_qos(10);
+  scan_qos.reliability(rclcpp::ReliabilityPolicy::Reliable);
+  scan_qos.durability(rclcpp::DurabilityPolicy::Volatile);
+  scan_qos.history(rclcpp::HistoryPolicy::KeepLast);
+  laser_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(laser_scan_topic, scan_qos,
       std::bind(&CLaserOdometry2DNode::LaserCallBack, this, std::placeholders::_1));
   
   // Initialize pose
@@ -117,7 +128,9 @@ bool CLaserOdometry2DNode::setLaserPoseFromTf()
 
   try
   {
-    tf_laser = buffer_->lookupTransform(base_frame_id, last_scan.header.frame_id, tf2::TimePointZero);
+    // Use scan timestamp for TF lookup to avoid TF_OLD_DATA errors
+    rclcpp::Time scan_time(last_scan.header.stamp.sec, last_scan.header.stamp.nanosec);
+    tf_laser = buffer_->lookupTransform(base_frame_id, last_scan.header.frame_id, scan_time, tf2::Duration(tf2::BUFFER_CORE_DEFAULT_CACHE_TIME));
     retrieved = true;
   }
   catch (tf2::TransformException &ex)
@@ -211,7 +224,8 @@ void CLaserOdometry2DNode::publish()
   
   // compose odom msg
   nav_msgs::msg::Odometry odom;
-  odom.header.stamp = rf2o_ref.last_odom_time;    // the time of the last scan used!
+  // Use current time to avoid TF_OLD_DATA errors
+  odom.header.stamp = this->now();
   odom.header.frame_id = odom_frame_id;
   //set the position
   odom.pose.pose.position.x = rf2o_ref.robot_pose_.translation()(0);
@@ -231,7 +245,8 @@ void CLaserOdometry2DNode::publish()
   {
     RCLCPP_DEBUG(get_logger(), "Publishing TF: [base_link] to [odom]");
     geometry_msgs::msg::TransformStamped odom_trans;
-    odom_trans.header.stamp = rf2o_ref.last_odom_time;    // the time of the last scan used!
+    // Use current time to avoid TF_OLD_DATA errors
+    odom_trans.header.stamp = this->now();
     odom_trans.header.frame_id = odom_frame_id;
     odom_trans.child_frame_id = base_frame_id;
     odom_trans.transform.translation.x = rf2o_ref.robot_pose_.translation()(0);
